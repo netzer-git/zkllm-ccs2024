@@ -9,3 +9,6 @@
 !.gitignore
 !CMakeLists.txt
 !README.md
+!REPORT.md
+!*.ipynb
+!examples/
