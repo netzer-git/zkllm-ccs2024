@@ -1,5 +1,42 @@
 #include "tlookup.cuh"
 #include "proof.cuh"
+#include "transcript.cuh"
+
+// Commit a tensor with `gen`, absorb the resulting commitment into the FS
+// transcript under `label`, and return the host-resident commitment bytes.
+// If the tensor is smaller than gen.size, zero-pad it up to the next multiple
+// so commit_int's divisibility requirement (tensor.size % gen.size == 0) holds.
+static void commit_and_absorb(const char* label,
+                              const Commitment& gen,
+                              const FrTensor& tensor)
+{
+    if (tensor.size % gen.size == 0) {
+        // Fast path: no padding needed.
+        G1TensorJacobian com = gen.commit_int(tensor);
+        std::vector<G1Jacobian_t> host(com.size);
+        cudaMemcpy(host.data(), com.gpu_data,
+                   com.size * sizeof(G1Jacobian_t), cudaMemcpyDeviceToHost);
+        fs_absorb_bytes(label, host.data(), host.size() * sizeof(G1Jacobian_t));
+        return;
+    }
+    // Slow path: zero-pad tensor up to next multiple of gen.size.
+    uint target = ((tensor.size + gen.size - 1) / gen.size) * gen.size;
+    FrTensor padded(target);
+    cudaMemset(padded.gpu_data, 0, target * sizeof(Fr_t));
+    cudaMemcpy(padded.gpu_data, tensor.gpu_data,
+               tensor.size * sizeof(Fr_t), cudaMemcpyDeviceToDevice);
+    G1TensorJacobian com = gen.commit_int(padded);
+    std::vector<G1Jacobian_t> host(com.size);
+    cudaMemcpy(host.data(), com.gpu_data,
+               com.size * sizeof(G1Jacobian_t), cudaMemcpyDeviceToHost);
+    fs_absorb_bytes(label, host.data(), host.size() * sizeof(G1Jacobian_t));
+}
+
+// Protocol 1, Line 2: Commit(T; 0) — table committed with zero randomness.
+void tLookupRange::commit_table(const Commitment& gen)
+{
+    commit_and_absorb("tlookup/table", gen, table);
+}
 
 // Some utils
 
@@ -321,7 +358,8 @@ Fr_t tLookup_phase1(const Fr_t& claim, const FrTensor& A, const FrTensor& S, con
 
 
 
-Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, const Fr_t& beta, const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof)
+Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, const Fr_t& beta, const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof,
+                    const Commitment& gen)
 {
     const uint D = S.size;
     if (m.size != table.size) {
@@ -333,11 +371,20 @@ Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, con
         throw std::runtime_error("D or N is not power of 2, or D is not divisible by N");
     }
 
+    // Protocol 1: commit S and m, then derive β from the transcript.
+    // This ensures commit-before-challenge ordering per Theorem 7.3.
+    commit_and_absorb("tlookup/S", gen, S);
+    commit_and_absorb("tlookup/m", gen, m);
+
+    // Draw the actual challenge AFTER S/m are in the transcript.
+    // The caller-provided beta is intentionally ignored.
+    auto internal_challenges = fs_challenge_vec("tlookup/beta", 1);
+    Fr_t beta_actual = internal_challenges[0];
 
     FrTensor A(D), B(N);
     tlookup_inv_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         S.gpu_data,
-        beta,
+        beta_actual,
         A.gpu_data,
         D
     );
@@ -345,11 +392,14 @@ Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, con
 
     tlookup_inv_kernel<<<(N+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         table.gpu_data,
-        beta,
+        beta_actual,
         B.gpu_data,
         N
     );
     cudaDeviceSynchronize();
+
+    commit_and_absorb("tlookup/A", gen, A);
+    commit_and_absorb("tlookup/B", gen, B);
 
     if (u.size() != ceilLog2(D)) throw std::runtime_error("u.size() != ceilLog2(D)");
     if (v.size() != ceilLog2(D)) throw std::runtime_error("v.size() != ceilLog2(D)");
@@ -365,7 +415,7 @@ Fr_t tLookup::prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, con
     Fr_t D_Fr = {D, 0, 0, 0, 0, 0, 0, 0};
 
     return tLookup_phase1(claim, A, S, B, table, m, 
-        alpha, beta, C, N_Fr / D_Fr, alpha_sq, 
+        alpha, beta_actual, C, N_Fr / D_Fr, alpha_sq, 
         u, v1, v2);
 } 
 
@@ -493,7 +543,8 @@ KERNEL void tlookuprange_pad_m(Fr_t* m_ptr, uint index_padded, uint num_added)
 
 Fr_t tLookupRangeMapping::prove(const FrTensor& S_in, const FrTensor& S_out, const FrTensor& m, 
         const Fr_t& r, const Fr_t& alpha, const Fr_t& beta, 
-        const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof)
+        const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof,
+        const Commitment& gen)
 {
     const uint D = S_in.size;
     if (m.size != table.size) throw std::runtime_error("m.size != table.size");
@@ -506,19 +557,29 @@ Fr_t tLookupRangeMapping::prove(const FrTensor& S_in, const FrTensor& S_out, con
         FrTensor m_(m);
         tlookuprange_pad_m<<<1,1>>>(m_.gpu_data, 0, (1 << ceilLog2(D)) - D);
         cudaDeviceSynchronize();
-        return prove(S_in_, S_out_, m_, r, alpha, beta, u, v, proof);
+        return prove(S_in_, S_out_, m_, r, alpha, beta, u, v, proof, gen);
     }
 
     if (N != 1 << ceilLog2(N) || D % N != 0) {
         throw std::runtime_error("N is not power of 2, or D is not divisible by N");
     }
 
+    // Commit S_in, S_out, m before the challenge-dependent computation.
+    commit_and_absorb("tlookup_rm/S_in",  gen, S_in);
+    commit_and_absorb("tlookup_rm/S_out", gen, S_out);
+    commit_and_absorb("tlookup_rm/m",     gen, m);
+
+    // Draw the actual challenge AFTER S/m are in the transcript.
+    // The caller-provided beta is intentionally ignored.
+    auto internal_challenges = fs_challenge_vec("tlookup_rm/beta", 1);
+    Fr_t beta_actual = internal_challenges[0];
+
     FrTensor A(D), B(N);
     auto S_com = S_in + S_out * r;
     auto T_com = table + mapped_vals * r;
     tlookup_inv_kernel<<<(D+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         S_com.gpu_data,
-        beta,
+        beta_actual,
         A.gpu_data,
         D
     );
@@ -526,11 +587,15 @@ Fr_t tLookupRangeMapping::prove(const FrTensor& S_in, const FrTensor& S_out, con
 
     tlookup_inv_kernel<<<(N+FrNumThread-1)/FrNumThread,FrNumThread>>>(
         T_com.gpu_data,
-        beta,
+        beta_actual,
         B.gpu_data,
         N
     );
     cudaDeviceSynchronize();
+
+    // Commit A and B after β (they depend on the challenge).
+    commit_and_absorb("tlookup_rm/A", gen, A);
+    commit_and_absorb("tlookup_rm/B", gen, B);
 
     if (u.size() != ceilLog2(D)) throw std::runtime_error("u.size() != ceilLog2(D)");
     if (v.size() != ceilLog2(D)) throw std::runtime_error("v.size() != ceilLog2(D)");

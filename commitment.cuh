@@ -21,6 +21,19 @@ class Commitment: public G1TensorJacobian
 
     Fr_t open(const FrTensor& t, const G1TensorJacobian& c, const vector<Fr_t>& u) const;
 
+    // Variant of open() that captures the me_open proof transcript so stages
+    // can write it into their proof bundle and an external verifier can check
+    // the opening.
+    Fr_t open_with_proof(const FrTensor& t, const G1TensorJacobian& c,
+                         const vector<Fr_t>& u, vector<G1Jacobian_t>& proof_out) const;
+
+    // Pedersen opening verifier. Returns true iff `proof` is a valid opening
+    // of `com` at `u` to the claim `claim`. Folds `com` at the outer
+    // challenges, runs the me_open round relation for log_2(size) steps, and
+    // checks C_final == claim * g_final. Runs on GPU (single-thread kernel).
+    bool verify_open(const G1TensorJacobian& com, const vector<Fr_t>& u,
+                     Fr_t claim, const vector<G1Jacobian_t>& proof) const;
+
     static Commitment random(uint size);
     static Fr_t me_open(const FrTensor& t, const Commitment& generators, vector<Fr_t>::const_iterator begin, vector<Fr_t>::const_iterator end, vector<G1Jacobian_t>& proof);
 };

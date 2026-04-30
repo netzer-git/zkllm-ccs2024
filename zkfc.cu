@@ -1,4 +1,5 @@
 #include "zkfc.cuh"
+#include "transcript.cuh"
 
 
 
@@ -62,9 +63,9 @@ vector<Claim> zkFC::prove(const FrTensor& X, const FrTensor& Y) const
 {
     if (has_bias) throw std::runtime_error("Cleaned-up version not implemented for zkFC with bias. Use zkFCStacked instead.");
     uint batchSize = X.size / inputSize;
-    auto u_batch = random_vec(ceilLog2(batchSize));
-    auto u_input = random_vec(ceilLog2(inputSize));
-    auto u_output = random_vec(ceilLog2(outputSize));
+    auto u_batch  = fs_challenge_vec("zkfc/u_batch",  ceilLog2(batchSize));
+    auto u_input  = fs_challenge_vec("zkfc/u_input",  ceilLog2(inputSize));
+    auto u_output = fs_challenge_vec("zkfc/u_output", ceilLog2(outputSize));
 
     
 
@@ -276,11 +277,12 @@ X(catTensors(Xs)), Y(catTensors(Ys)), W(catLayerWeights(layers)), b(catLayerBias
 
 void zkFCStacked::prove(vector<Polynomial>& proof) const
 {
-    auto u_num = random_vec(ceilLog2(num));
-    auto v_num = random_vec(ceilLog2(num));
-    auto u_batch = random_vec(ceilLog2(batchSize));
-    auto u_input = random_vec(ceilLog2(inputSize));
-    auto u_output = random_vec(ceilLog2(outputSize));
+    // FS-bound challenges.
+    auto u_num    = fs_challenge_vec("zkfc_stacked/u_num",    ceilLog2(num));
+    auto v_num    = fs_challenge_vec("zkfc_stacked/v_num",    ceilLog2(num));
+    auto u_batch  = fs_challenge_vec("zkfc_stacked/u_batch",  ceilLog2(batchSize));
+    auto u_input  = fs_challenge_vec("zkfc_stacked/u_input",  ceilLog2(inputSize));
+    auto u_output = fs_challenge_vec("zkfc_stacked/u_output", ceilLog2(outputSize));
 
     prove(u_num, v_num, u_batch, u_input, u_output, proof);
 }

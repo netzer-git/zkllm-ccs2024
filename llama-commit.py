@@ -44,4 +44,26 @@ if __name__ == '__main__':
                 os.system(f'./commit-param {pp_path} {int_bin_path} {commitment_path} {w_out.shape[0]} {w_out.shape[1]}')
             else:
                 os.system(f'./commit-param {pp_path} {int_bin_path} {commitment_path} {w_out.shape[0]} 1')
+
+    # Commit embedding, final RMSNorm, and output projection weights
+    extra_params = {
+        "embed_tokens": model.model.embed_tokens.weight,
+        "lm_head": model.lm_head.weight,
+        "model.norm": model.model.norm.weight,
+    }
+    for name, w in extra_params.items():
+        if len(w.shape) == 2:
+            w_orig = w.float().T
+        else:
+            w_orig = w.float()
+        w_out = torch.round(w_orig * scaling_factor).to(torch.int32)
+        print(f'Max difference of {name}: {((w_out / scaling_factor) - w_orig).abs().max().item()}')
+        pp_path = f"./zkllm-workdir/Llama-2-{args.model_size}b/{name}.weight-pp.bin"
+        int_bin_path = f"./zkllm-workdir/Llama-2-{args.model_size}b/{name}.weight-int.bin"
+        commitment_path = f"./zkllm-workdir/Llama-2-{args.model_size}b/{name}.weight-commitment.bin"
+        save_weight_int(w_out, int_bin_path)
+        if len(w_out.shape) == 2:
+            os.system(f'./commit-param {pp_path} {int_bin_path} {commitment_path} {w_out.shape[0]} {w_out.shape[1]}')
+        else:
+            os.system(f'./commit-param {pp_path} {int_bin_path} {commitment_path} {w_out.shape[0]} 1')
         

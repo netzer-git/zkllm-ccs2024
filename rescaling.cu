@@ -1,4 +1,5 @@
 #include "rescaling.cuh"
+#include "transcript.cuh"
 
 Rescaling::Rescaling(uint scaling_factor): scaling_factor(scaling_factor), tl_rem(-static_cast<int>(scaling_factor>>1), scaling_factor), rem_tensor_ptr(nullptr)
 {
@@ -38,17 +39,20 @@ Rescaling::~Rescaling()
     if (rem_tensor_ptr) delete rem_tensor_ptr;
 }
 
-vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_)
+vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_, const Commitment& gen)
 {
     if (X.size != X_.size)
     {
         throw std::runtime_error("Error: the size of X and X_ should be the same.");
     }
 
-    auto u = random_vec(ceilLog2(X.size));
-    auto v = random_vec(ceilLog2(X.size));
-    
-    auto rand_temp = random_vec(2);
+    // Commit the remainder lookup table before any challenge is drawn
+    tl_rem.commit_table(gen);
+
+    auto u = fs_challenge_vec("rescaling/u", ceilLog2(X.size));
+    auto v = fs_challenge_vec("rescaling/v", ceilLog2(X.size));
+
+    auto rand_temp = fs_challenge_vec("rescaling/rand_temp", 2);
     vector<Polynomial> proof;
 
     auto rem = rem_tensor_ptr -> pad({rem_tensor_ptr -> size});
@@ -70,7 +74,7 @@ vector<Claim> Rescaling::prove(const FrTensor& X, const FrTensor& X_)
     // cout << tl_rem.table << endl;
     // cout << m*tl_rem.table << endl;
     // cout << (m*tl_rem.table).sum() << endl;
-    tl_rem.prove(rem, m, rand_temp[0], rand_temp[1], u, v, proof);
+    tl_rem.prove(rem, m, rand_temp[0], rand_temp[1], u, v, proof, gen);
 
     
     

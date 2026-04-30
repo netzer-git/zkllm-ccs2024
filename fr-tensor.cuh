@@ -21,7 +21,30 @@ const uint FrSharedMemorySize = 2 * sizeof(Fr_t) * FrNumThread;
 
 ostream& operator<<(ostream& os, const Fr_t& x);
 
+// DEPRECATED: random_vec() uses std::mt19937 seeded from std::random_device,
+// which is NOT a secure Fiat-Shamir hash. It is preserved for legacy call
+// sites. All new code MUST use `fs_challenge_vec()` (declared below) or a
+// Transcript directly.
 vector<Fr_t> random_vec(uint len);
+
+// Fiat-Shamir challenge draw backed by the process-global transcript
+// (see transcript.cuh / fr-tensor.cu). Before calling this, callers MUST have
+// absorbed every commitment and every prover-sent message the challenge is
+// supposed to bind. See transcript.cuh for absorb_* helpers and the global
+// `fs_transcript()` accessor.
+vector<Fr_t> fs_challenge_vec(const char* label, uint len);
+Fr_t          fs_challenge_fr (const char* label);
+
+// Host-side Fr_t arithmetic helpers (defined in fr-tensor.cu). The
+// `blstrs__scalar__Scalar_*` family is `__device__` only, so any code running
+// on the host that needs field arithmetic on single Fr_t values (e.g. proof
+// assembly, transcript-bound sanity checks) must use these.
+Fr_t fr_host_add(const Fr_t& a, const Fr_t& b);
+Fr_t fr_host_sub(const Fr_t& a, const Fr_t& b);
+// Attempts to interpret x as a signed long (matches scalar_to_long semantics).
+// Returns false if x does not fit in [LONG_MIN, LONG_MAX].
+bool fr_host_to_long(const Fr_t& x, long& out);
+
 uint ceilLog2(uint num);
 
 template<typename T>

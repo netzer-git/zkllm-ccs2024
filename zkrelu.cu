@@ -1,4 +1,5 @@
 #include "zkrelu.cuh" 
+#include <stdexcept>
 
 zkReLU::zkReLU(uint scaling_factor): scaling_factor(scaling_factor), tl_rem(-static_cast<int>(scaling_factor>>1), scaling_factor), sign_tensor_ptr(nullptr), abs_tensor_ptr(nullptr), rem_tensor_ptr(nullptr), m_tensor_ptr(nullptr)
 {
@@ -56,6 +57,28 @@ FrTensor zkReLU::operator()(const FrTensor& X)
 
 void zkReLU::prove(const FrTensor& Z, const FrTensor& A)
 {
+    // This method is not called anywhere in the current LLaMA pipeline (which
+    // uses SwiGLU / SiLU via tLookupRangeMapping in ffn.cu), and no validated
+    // end-to-end lookup-proof implementation exists. Rather than ship a
+    // fabricated one, we fail fast so any future caller is forced to implement
+    // the sign/|X|/remainder lookup proof.
+    //
+    // Protocol sketch for a future implementer:
+    //   Decomposition already computed in operator(): X = sign * (|X| * s + r)
+    //     where s = scaling_factor, |sign| ∈ {0, 1}, |X|, r ∈ tabled ranges.
+    //   Required proofs:
+    //     (1) sign_i * (sign_i - 1) = 0          (boolean via sumcheck)
+    //     (2) Z_i = sign_i * (|X|_i * s + r_i)   (hadamard + rescale sumcheck)
+    //     (3) A_i = sign_i * |X|_i               (hadamard sumcheck)
+    //     (4) r_i ∈ [-s/2, s/2)                  (tLookup tl_rem, already set up)
+    //     (5) |X|_i ∈ [0, 2^bits)                (tLookup range proof)
+    //   All challenges must come from fs_challenge_vec / fs_challenge_fr with
+    //   Z and A commitments absorbed first.
+    throw std::runtime_error(
+        "zkReLU::prove() is not implemented in this fork. "
+        "The LLaMA pipeline does not currently invoke this method; if you "
+        "need ReLU proofs, implement the 5-step protocol sketched above in "
+        "zkrelu.cu.");
 }
 
 zkReLU::~zkReLU()

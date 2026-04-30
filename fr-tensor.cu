@@ -1,5 +1,8 @@
 #include "fr-tensor.cuh"
 #include "ioutils.cuh"
+#include "transcript.cuh"
+#include <limits>
+#include <cstdint>
 
 using namespace std;
 
@@ -21,6 +24,131 @@ vector<Fr_t> random_vec(uint len)
     vector<Fr_t> out(len);
     for (uint i = 0; i < len; ++ i) out[i] = {dist(mt), dist(mt), dist(mt), dist(mt), dist(mt), dist(mt), dist(mt), dist(mt) % 1944954707};
     return out;
+}
+
+// -----------------------------------------------------------------------------
+// Fiat-Shamir transcript singleton.
+// -----------------------------------------------------------------------------
+Transcript& fs_transcript() {
+    static Transcript g("zkLLM/v1");
+    return g;
+}
+
+void fs_transcript_init(const std::string& stage_tag) {
+    // Re-seed the global transcript with a fresh protocol tag. This is safe
+    // to call at the start of each stage's main(); subsequent absorbs chain
+    // from the new seed.
+    fs_transcript() = Transcript("zkLLM/v1/" + stage_tag);
+}
+
+vector<Fr_t> fs_challenge_vec(const char* label, uint len) {
+    return fs_transcript().challenge_vec(label, len);
+}
+
+Fr_t fs_challenge_fr(const char* label) {
+    return fs_transcript().challenge_fr(label);
+}
+
+// -----------------------------------------------------------------------------
+// Host-side Fr_t arithmetic. The `blstrs__scalar__Scalar_*` family is
+// `__device__` only (see bls12-381.cuh), so any non-kernel code that needs to
+// add/subtract/compare field elements must use these host helpers. They are
+// implemented directly from the published BLS12-381 scalar field modulus
+// (r = 0x73eda753...00000001), using 32-bit limbs to match Fr_t::val[].
+//
+// These helpers are intentionally simple and NOT constant-time; they run on
+// public values (commitments, sums, challenges) that don't need side-channel
+// protection on the host. Never use them on secret witnesses.
+// -----------------------------------------------------------------------------
+static const uint32_t kFrModulus[8] = {
+    1u, 4294967295u, 4294859774u, 1404937218u,
+    161601541u, 859428872u, 698187080u, 1944954707u
+};
+
+static bool fr_host_gte(const Fr_t& a, const Fr_t& b) {
+    for (int i = 7; i >= 0; --i) {
+        if (a.val[i] > b.val[i]) return true;
+        if (a.val[i] < b.val[i]) return false;
+    }
+    return true;
+}
+
+static bool fr_host_gte_mod(const Fr_t& a) {
+    for (int i = 7; i >= 0; --i) {
+        if (a.val[i] > kFrModulus[i]) return true;
+        if (a.val[i] < kFrModulus[i]) return false;
+    }
+    return true;
+}
+
+static Fr_t fr_host_sub_raw(const Fr_t& a, const Fr_t& b) {
+    Fr_t r; uint64_t borrow = 0;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t ai = a.val[i], bi = b.val[i];
+        uint64_t d = ai - bi - borrow;
+        r.val[i] = static_cast<uint32_t>(d & 0xFFFFFFFFull);
+        borrow = (ai < bi + borrow) ? 1 : 0;
+    }
+    return r;
+}
+
+static Fr_t fr_host_add_raw(const Fr_t& a, const Fr_t& b, uint32_t& carry_out) {
+    Fr_t r; uint64_t carry = 0;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t s = static_cast<uint64_t>(a.val[i]) + b.val[i] + carry;
+        r.val[i] = static_cast<uint32_t>(s & 0xFFFFFFFFull);
+        carry = s >> 32;
+    }
+    carry_out = static_cast<uint32_t>(carry);
+    return r;
+}
+
+Fr_t fr_host_add(const Fr_t& a, const Fr_t& b) {
+    uint32_t carry;
+    Fr_t r = fr_host_add_raw(a, b, carry);
+    Fr_t P = {{kFrModulus[0], kFrModulus[1], kFrModulus[2], kFrModulus[3],
+               kFrModulus[4], kFrModulus[5], kFrModulus[6], kFrModulus[7]}};
+    if (carry || fr_host_gte_mod(r)) r = fr_host_sub_raw(r, P);
+    return r;
+}
+
+Fr_t fr_host_sub(const Fr_t& a, const Fr_t& b) {
+    Fr_t P = {{kFrModulus[0], kFrModulus[1], kFrModulus[2], kFrModulus[3],
+               kFrModulus[4], kFrModulus[5], kFrModulus[6], kFrModulus[7]}};
+    if (fr_host_gte(a, b)) return fr_host_sub_raw(a, b);
+    // a < b: result = a - b + P
+    Fr_t diff = fr_host_sub_raw(a, b);   // borrow wraps into high end
+    uint32_t carry;
+    return fr_host_add_raw(diff, P, carry);
+}
+
+// Host-side signed-long conversion. Returns true if the scalar fits in the
+// [-2^63, 2^63) range the paper uses for fixed-point values (checked via the
+// same "top-half-of-P means negative" trick that scalar_to_long uses).
+bool fr_host_to_long(const Fr_t& x, long& out) {
+    // Quick zero check.
+    Fr_t P = {{kFrModulus[0], kFrModulus[1], kFrModulus[2], kFrModulus[3],
+               kFrModulus[4], kFrModulus[5], kFrModulus[6], kFrModulus[7]}};
+    // P/2 rounded down: anything >= P/2 is treated as a negative long.
+    Fr_t half = P;
+    // right shift by 1 across limbs
+    for (int i = 0; i < 7; ++i) {
+        half.val[i] = (half.val[i] >> 1) | (half.val[i + 1] << 31);
+    }
+    half.val[7] >>= 1;
+    Fr_t v = fr_host_gte(x, half) ? fr_host_sub_raw(P, x) : x;
+    // v must fit in 64 bits: upper 6 limbs all zero.
+    if (v.val[2] | v.val[3] | v.val[4] | v.val[5] | v.val[6] | v.val[7]) return false;
+    uint64_t u = static_cast<uint64_t>(v.val[0]) | (static_cast<uint64_t>(v.val[1]) << 32);
+    if (fr_host_gte(x, half)) {
+        // Negative: out = -u. Guard against overflow at LONG_MIN.
+        if (u > static_cast<uint64_t>(std::numeric_limits<long>::max()) + 1) return false;
+        out = -static_cast<long>(u);
+    } else {
+        if (u > static_cast<uint64_t>(std::numeric_limits<long>::max())) return false;
+        out = static_cast<long>(u);
+    }
+    return true;
 }
 
 uint ceilLog2(uint num) {

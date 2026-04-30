@@ -5,6 +5,8 @@
 #include "fr-tensor.cuh" 
 #include "polynomial.cuh"
 #include "proof.cuh"
+#include "commitment.cuh"
+#include "transcript.cuh"
 
 
 
@@ -18,7 +20,8 @@ class tLookup
     FrTensor prep(const uint* indices, const uint D); // D - dimension of the tensor
 
     Fr_t prove(const FrTensor& S, const FrTensor& m, const Fr_t& alpha, const Fr_t& beta,
-     const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof);
+     const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof,
+     const Commitment& gen);
 };
 
 class tLookupRange: public tLookup
@@ -31,6 +34,10 @@ class tLookupRange: public tLookup
     FrTensor prep(const FrTensor& vals);
     
     using tLookup::prove;
+
+    // Commit the table tensor during setup (with zero randomness, per Protocol 1 Line 2).
+    // Call once after construction; absorbs into the FS transcript.
+    void commit_table(const Commitment& gen);
 };
 
 class tLookupRangeMapping: public tLookupRange
@@ -48,7 +55,8 @@ class tLookupRangeMapping: public tLookupRange
     
     Fr_t prove(const FrTensor& S_in, const FrTensor& S_out, const FrTensor& m, 
         const Fr_t& r, const Fr_t& alpha, const Fr_t& beta,
-        const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof);
+        const vector<Fr_t>& u, const vector<Fr_t>& v, vector<Polynomial>& proof,
+        const Commitment& gen);
 };
 
 #endif
